@@ -3,6 +3,8 @@
 from biolink_to_text.schema import (
     ENUM_QUALIFIER_SLOTS,
     candidate_predicates,
+    predicate_definition,
+    predicate_tree,
     qualifier_description,
     qualifier_enum_name,
 )
@@ -18,10 +20,34 @@ def test_candidate_predicates_is_directional_intersection():
     assert "has_phenotype" not in cands
 
 
+def test_candidate_predicates_includes_inherited_domain_predicates():
+    """Core predicates that inherit (not declare) their domain must survive."""
+    cands = candidate_predicates("chemical entity", "gene")
+    assert {"affects", "causes", "regulates", "contributes_to"} <= cands
+
+
 def test_candidate_predicates_keeps_both_directional_forms():
     """Non-canonical inverses stay available so either surface order works."""
     cands = candidate_predicates("small molecule", "protein")
     assert "is_substrate_of" in cands and "has_substrate" in cands
+
+
+def test_predicate_tree_orders_by_specificity_and_marks_leaves():
+    cands = candidate_predicates("chemical entity", "gene")
+    rows = predicate_tree(cands)
+    depth = {token: d for d, token, _ in rows}
+    leaf = {token: is_leaf for _, token, is_leaf in rows}
+    # Every candidate appears exactly once.
+    assert {token for _, token, _ in rows} == cands
+    # Specificity is reflected by depth: causes is deeper than its parent.
+    assert depth["causes"] > depth["contributes_to"] > depth["related_to"]
+    # A predicate with a more specific candidate beneath it is not a leaf...
+    assert leaf["causes"] and not leaf["affects"]  # regulates/disrupts under affects
+
+
+def test_predicate_definition():
+    assert predicate_definition("causes")
+    assert predicate_definition("not_a_predicate") is None
 
 
 def test_candidate_predicates_unknown_class_is_empty():

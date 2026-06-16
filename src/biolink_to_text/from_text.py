@@ -21,6 +21,8 @@ from biolink_to_text.schema import (
     candidate_predicates,
     is_valid_predicate,
     permissible_values,
+    predicate_definition,
+    predicate_tree,
     qualifier_description,
     qualifier_enum_name,
     validate_qualifier,
@@ -29,8 +31,9 @@ from biolink_to_text.schema import (
 _SYSTEM = (
     "You convert a biomedical statement into a Biolink Model qualified edge. "
     "The subject and object entities are already identified for you. Determine "
-    "the predicate and any qualifiers that hold between them. Only use values "
-    "from the provided vocabularies. Omit qualifiers that do not apply."
+    "the predicate and any qualifiers that hold between them. Prefer the most "
+    "specific predicate the text supports. Only use values from the provided "
+    "vocabularies. Omit qualifiers that do not apply."
 )
 
 
@@ -86,6 +89,36 @@ def _qualifier_line(slot: str) -> str:
     return line
 
 
+def _predicate_section(candidates: frozenset[str]) -> str:
+    """Render candidates as an ``is_a`` tree plus definitions of the leaf nodes.
+
+    Deeper rows are more specific; the model is asked to pick the most specific
+    predicate that applies. Definitions are included for the leaf (most specific)
+    predicates to help disambiguate them.
+    """
+    rows = predicate_tree(candidates)
+    tree = "\n".join("  " * depth + f"- {token}" for depth, token, _ in rows)
+
+    definitions = [
+        f"- {token}: {definition}"
+        for _, token, is_leaf in rows
+        if is_leaf and (definition := predicate_definition(token))
+    ]
+
+    section = (
+        "Candidate predicates as an is_a hierarchy (deeper = more specific). "
+        "Choose exactly one — the most specific predicate that the text supports, "
+        "using a more general (shallower) one only when no descendant applies:\n"
+        + tree
+    )
+    if definitions:
+        section += (
+            "\n\nDefinitions of the most specific (leaf) predicates:\n"
+            + "\n".join(definitions)
+        )
+    return section
+
+
 def _build_prompt(text: str, subject: Entity, object: Entity) -> str:
     sections = [
         f"Statement: {text!r}",
@@ -95,10 +128,7 @@ def _build_prompt(text: str, subject: Entity, object: Entity) -> str:
 
     candidates = _candidate_predicates(subject, object)
     if candidates:
-        sections.append(
-            "Candidate predicates (choose exactly one):\n  "
-            + ", ".join(sorted(candidates))
-        )
+        sections.append(_predicate_section(candidates))
 
     qualifier_lines = [
         _qualifier_line(slot)

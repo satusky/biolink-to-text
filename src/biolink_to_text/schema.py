@@ -62,36 +62,98 @@ def humanize(token: str) -> str:
     return local.replace("_", " ").strip()
 
 
+def _local(token: str) -> str:
+    """Bare snake_case token: strip a CURIE prefix, keep the underscores."""
+    return token.split(":", 1)[-1] if ":" in token else token
+
+
 def is_valid_predicate(name: str) -> bool:
     """True if ``name`` is a predicate in the Biolink Model."""
     return toolkit().is_predicate(name)
+
+
+@lru_cache(maxsize=1)
+def _all_predicates() -> tuple[str, ...]:
+    """Every Biolink predicate as a bare snake_case token (``related to`` root)."""
+    descendants = toolkit().get_descendants(
+        "related to", reflexive=True, mixin=True, formatted=True
+    )
+    return tuple(_local(p) for p in descendants)
 
 
 @lru_cache(maxsize=None)
 def candidate_predicates(subject_class: str, object_class: str) -> frozenset[str]:
     """Predicates that can connect ``subject_class`` -> ``object_class``.
 
-    The intersection of predicates whose domain admits the subject class and
-    whose range admits the object class (ancestors and mixins included), as bare
-    snake_case tokens (``affects``, ``is_substrate_of``) matching the form used
-    elsewhere in the library. Returns an empty set when either class is unknown
-    to bmt, so callers can fall back to an unconstrained predicate.
+    A predicate qualifies when the subject is-a its effective domain *and* the
+    object is-a its effective range; a predicate that declares no domain (resp.
+    range) is treated as unrestricted on that side. Tokens are bare snake_case
+    (``affects``, ``is_substrate_of``) matching the rest of the library. Returns
+    an empty set when either class is unknown to bmt, so callers can fall back to
+    an unconstrained predicate.
 
-    The constraint is permissive (Biolink domain/range are loose), so it does
-    not enforce edge direction: both a predicate and its non-canonical inverse
-    can appear, which is intentional — text may state a relation in either order
-    while the subject/object stay fixed.
+    Note this honours *inherited* domain/range: core predicates like ``affects``
+    and ``causes`` declare none of their own (they inherit ``named thing`` from
+    ``related to``) and so are correctly admitted — unlike
+    ``Toolkit.get_all_predicates_with_class_domain``, which keys off a predicate's
+    own ``domain`` and silently drops them. The constraint is therefore permissive
+    and does not enforce edge direction: a predicate and its non-canonical inverse
+    can both appear, which is intentional — text may state a relation in either
+    order while the subject/object stay fixed.
     """
     tk = toolkit()
     if tk.get_element(subject_class) is None or tk.get_element(object_class) is None:
         return frozenset()
-    domain = tk.get_all_predicates_with_class_domain(
-        subject_class, check_ancestors=True, mixin=True, formatted=True
-    )
-    range_ = tk.get_all_predicates_with_class_range(
-        object_class, check_ancestors=True, mixin=True, formatted=True
-    )
-    return frozenset(p.split(":", 1)[-1] for p in set(domain) & set(range_))
+    subject_ancestors = set(tk.get_ancestors(subject_class, reflexive=True, mixin=True))
+    object_ancestors = set(tk.get_ancestors(object_class, reflexive=True, mixin=True))
+
+    candidates = []
+    for predicate in _all_predicates():
+        name = humanize(predicate)
+        domain = tk.get_slot_domain(name, include_ancestors=False, mixin=True)
+        range_ = tk.get_slot_range(name, include_ancestors=False, mixin=True)
+        subject_ok = not domain or any(d in subject_ancestors for d in domain)
+        object_ok = not range_ or any(r in object_ancestors for r in range_)
+        if subject_ok and object_ok:
+            candidates.append(predicate)
+    return frozenset(candidates)
+
+
+@lru_cache(maxsize=None)
+def predicate_definition(predicate: str) -> str | None:
+    """The Biolink definition for a ``predicate``, whitespace-normalized."""
+    element = toolkit().get_element(humanize(predicate))
+    if element is None or not element.description:
+        return None
+    return " ".join(element.description.split())
+
+
+@lru_cache(maxsize=None)
+def predicate_tree(candidates: frozenset[str]) -> tuple[tuple[int, str, bool], ...]:
+    """``(depth, predicate, is_leaf)`` rows for the candidates' ``is_a`` subtree.
+
+    Rows are in tree (pre-order) order; ``depth`` counts only candidate ancestors
+    so the rendered tree is compact, and ``is_leaf`` marks candidates with no more
+    specific candidate beneath them (the most specific choices). Conveys predicate
+    specificity to the model: deeper ``is_a`` descendants are more specific.
+    """
+    tk = toolkit()
+    rows: list[tuple[int, str, bool]] = []
+
+    def walk(name: str, depth: int) -> None:
+        token = _local(name).replace(" ", "_")
+        is_candidate = token in candidates
+        if is_candidate:
+            descendants = tk.get_descendants(
+                name, reflexive=False, mixin=True, formatted=True
+            )
+            is_leaf = not any(_local(d) in candidates for d in descendants)
+            rows.append((depth, token, is_leaf))
+        for child in sorted(tk.get_children(name, mixin=True)):
+            walk(child, depth + 1 if is_candidate else depth)
+
+    walk("related to", 0)
+    return tuple(rows)
 
 
 @lru_cache(maxsize=None)
